@@ -4,15 +4,13 @@ import logging
 from pathlib import Path
 import pandas as pd
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
-from src import (DatasetInfo,
-                MovieStorage,
+from src import (MovieStorage,
                 MovieUploadInfo,
                 MovieDataResponse,
                 MovieProcessingReport,
                 HealthResponse,
                 setup_logging,
                 ProcessConfig,
-                ProcessingReport,
                 log_requests,
                 MOVIE_COLUMNS)
 from data_pipeline import create_cleaning_report, process_data, validate_dataframe
@@ -41,7 +39,7 @@ async def upload_movies(file: UploadFile = File(...)):
         logger.warning(f"Cannot parse CSV {file.filename}: {error}")
         raise HTTPException(status_code=400, detail="Cannot parse the uploaded CSV")
 
-    if set(df.columns) != set(MOVIE_COLUMNS):
+    if len(df.columns) != len(MOVIE_COLUMNS) or set(df.columns) != set(MOVIE_COLUMNS):
         raise HTTPException(status_code=400, detail=f"A CSV must contain these columns: {MOVIE_COLUMNS}")
     if df.empty:
         raise HTTPException(status_code=400, detail="A CSV must contain at least one movie")
@@ -58,47 +56,45 @@ async def upload_movies(file: UploadFile = File(...)):
         column_names=list(df.columns)
     )
 
-@app.get("/datasets/{dataset_id}")
-def get_dataset(dataset_id: int, limit: int = Query(default=100, ge=1)):
-    df = storage.get(dataset_id)
+@app.get("/movies", response_model=MovieDataResponse)
+def get_movies(limit: int = Query(default=100, ge=1)):
+    movies = storage.select_columns(MOVIE_COLUMNS, limit)
+    total_movies = storage.count_movies()
+    logger.info(f"Retrieved {len(movies)} movies")
 
-    if df is None:
-        logger.warning(f"Dataset not found: id={dataset_id}")
-        raise HTTPException(status_code=404, detail=f"Dataset {dataset_id} not found")
+    return {"data": movies, "total_rows": total_movies}
 
-    records = json.loads(df.head(limit).to_json(orient="records"))
+@app.get("/movies/search", response_model=list[dict])
+def query_movies(
+    columns: list[str] = Query(default=["title"]),
+    min_rating: float = Query(default=0, ge=0, le=10),
+    limit: int = Query(default=100, ge=1)
+):
+    try:
+        movies = storage.query_movies(columns, min_rating, limit)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    logger.info(f"Selected columns {columns}, returned {len(movies)} movies")
 
-    logger.info(f"Retrieved dataset: id={dataset_id}, rows={len(records)}")
+    return movies
 
-    return {
-        "id": dataset_id,
-        "data": records,
-        "total_rows": len(df)
-    }
+@app.post("/movies/process", response_model=MovieProcessingReport)
+def process_movies(config: ProcessConfig):
+    logger.info("Processing movies")
 
-@app.post(
-    "/datasets/{dataset_id}/process",
-    response_model=ProcessingReport
-)
-def process_dataset(dataset_id: int, config: ProcessConfig):
-    """Validate and process a stored dataset using MP1 functions."""
-    logger.info(f"Processing dataset: id={dataset_id}")
+    # 1. Retrieve stored movies
+    df = storage.get()
+    if df.empty:
+        raise HTTPException(status_code=400, detail="No movies available to process")
 
-    # 1. Retrieve a copy of the stored dataset
-    df = storage.get(dataset_id)
-
-    if df is None:
-        raise HTTPException(status_code=404, detail=f"Dataset not found: id={dataset_id}")
-
-    # 2. Convert the configuration model to a dictionary
+    # 2. Convert configuration model to a dictionary
     config_dict = config.model_dump()
-
     validation_config = config_dict["validation"]
-    processing_config = config_dict["processing"]
 
     try:
         # 3. Confirm configured numeric columns exist
         missing_columns = [column for column in validation_config["numeric_columns"] if column not in df.columns]
+
         if missing_columns:
             raise HTTPException(status_code=400, detail=f"Numeric columns not found: {missing_columns}")
 
@@ -112,23 +108,24 @@ def process_dataset(dataset_id: int, config: ProcessConfig):
         # 5. Record validation rows removed and copy the result
         validation_rows_removed = len(df) - len(validated_df)
         validated_copy = validated_df.copy()
-        logger.info(f"Dataset validation complete: id={dataset_id}, rows_removed={validation_rows_removed}")
+
+        logger.info(f"Movie validation complete: rows_removed={validation_rows_removed}")
 
         # 6. Process the validated DataFrame
         processed_df = process_data(validated_df, config_dict)
 
         # 7. Compare before and after processing
         cleaning_report = create_cleaning_report(validated_copy, processed_df)
-        logger.info(f"Dataset processing complete: id={dataset_id}, rows_removed={cleaning_report["rows_removed"]}, columns_removed={cleaning_report["columns_removed"]}")
+
+        logger.info(f"Movie processing complete: rows_removed={cleaning_report['rows_removed']}, columns_removed={cleaning_report['columns_removed']}")
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
 
-    # 8. Update the existing dataset only after successful processing
-    storage.update(dataset_id, processed_df)
+    # 8. Save the processed movies
+    storage.save(processed_df)
 
     # 9. Return the response
     return {
-        "id": dataset_id,
         "validation_rows_removed": validation_rows_removed,
         "cleaning_report": cleaning_report
     }
