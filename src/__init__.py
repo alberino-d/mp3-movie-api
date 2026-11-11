@@ -13,3 +13,4 @@ from .models import (DatasetInfo,
 from .storage import MovieStorage, MOVIE_COLUMNS
 from .utils import setup_logging
 from .middleware import log_requests
+from .cache import MovieCache

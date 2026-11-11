@@ -12,6 +12,7 @@ from src import (MovieStorage,
                 setup_logging,
                 ProcessConfig,
                 log_requests,
+                MovieCache,
                 MOVIE_COLUMNS)
 from data_pipeline import create_cleaning_report, process_data, validate_dataframe
 
@@ -21,6 +22,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Data Processing API", version="1.0.0")
 app.middleware("http")(log_requests)
 storage = MovieStorage()
+cache = MovieCache()
 
 @app.get("/health", response_model=HealthResponse)
 def health_check():
@@ -58,11 +60,17 @@ async def upload_movies(file: UploadFile = File(...)):
 
 @app.get("/movies", response_model=MovieDataResponse)
 def get_movies(limit: int = Query(default=100, ge=1)):
+    cached = cache.get(limit)
+    if cached is not None:
+        logger.info(f"Cache HIT: Returning cached movies (limit={limit})")
+        return cached
     movies = storage.select_columns(MOVIE_COLUMNS, limit)
     total_movies = storage.count_movies()
+    response = {"data": movies, "total_rows": total_movies}
+    cache.set(limit, response)
     logger.info(f"Retrieved {len(movies)} movies")
 
-    return {"data": movies, "total_rows": total_movies}
+    return response
 
 @app.get("/movies/search", response_model=list[dict])
 def query_movies(
