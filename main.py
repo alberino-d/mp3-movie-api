@@ -48,6 +48,7 @@ async def upload_movies(file: UploadFile = File(...)):
     df = df[MOVIE_COLUMNS]
 
     storage.save(df)
+    cache.invalidate()
 
     logger.info(f"Uploaded {file.filename}: {len(df)} movies saved")
 
@@ -131,6 +132,7 @@ def process_movies(config: ProcessConfig):
 
     # 8. Save the processed movies
     storage.save(processed_df)
+    cache.invalidate()
 
     # 9. Return the response
     return {
